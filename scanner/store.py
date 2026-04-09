@@ -35,10 +35,11 @@ CREATE TABLE IF NOT EXISTS arbitrage_opportunities (
     source_table          TEXT NOT NULL,
     detected_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expired_at            TIMESTAMPTZ,
-    status                TEXT NOT NULL DEFAULT 'active',
-    UNIQUE(opportunity_key, status) WHERE (status = 'active')
+    status                TEXT NOT NULL DEFAULT 'active'
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_arb_opps_active_key
+    ON arbitrage_opportunities(opportunity_key) WHERE (status = 'active');
 CREATE INDEX IF NOT EXISTS idx_arb_opps_status ON arbitrage_opportunities(status);
 CREATE INDEX IF NOT EXISTS idx_arb_opps_sport ON arbitrage_opportunities(sport);
 CREATE INDEX IF NOT EXISTS idx_arb_opps_roi ON arbitrage_opportunities(roi DESC);
@@ -59,7 +60,7 @@ INSERT INTO arbitrage_opportunities (
     %s, %s, %s,
     %s, %s, 'active'
 )
-ON CONFLICT (opportunity_key) WHERE (status = 'active')
+ON CONFLICT (opportunity_key) WHERE status = 'active'
 DO UPDATE SET
     buy_yes_price        = EXCLUDED.buy_yes_price,
     buy_no_price         = EXCLUDED.buy_no_price,
