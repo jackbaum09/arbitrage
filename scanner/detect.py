@@ -308,7 +308,7 @@ def scan_game_markets() -> list[Opportunity]:
                     p.no_price  AS p_no,
                     k.volume    AS k_volume,
                     p.liquidity AS p_liquidity,
-                    k.platform_market_id AS k_market_id,
+                    k.market_ticker AS k_market_id,
                     p.platform_market_id AS p_market_id
                 FROM {kalshi_table} k
                 JOIN {pm_table} p
