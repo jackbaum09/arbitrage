@@ -48,7 +48,9 @@ class KalshiClient:
     def _sign_request(self, method: str, path: str) -> dict[str, str]:
         """Generate authentication headers for a Kalshi API request."""
         timestamp = str(int(time.time() * 1000))
-        message = f"{timestamp}{method.upper()}{path}"
+        # Signature must include the full API path (e.g., /trade-api/v2/portfolio/balance)
+        full_path = f"/trade-api/v2{path}"
+        message = f"{timestamp}{method.upper()}{full_path}"
 
         signature = self._private_key.sign(
             message.encode(),
@@ -174,5 +176,9 @@ class KalshiClient:
 
     def get_open_orders(self) -> list[dict]:
         """Get all resting (open) orders."""
-        data = self._request("GET", "/portfolio/orders?status=resting")
-        return data.get("orders", [])
+        # Query params are passed separately, not in the signed path
+        headers = self._sign_request("GET", "/portfolio/orders")
+        url = f"{self.base_url}/portfolio/orders?status=resting"
+        resp = requests.get(url, headers=headers, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json().get("orders", [])
