@@ -106,6 +106,13 @@ def run_scan(execute: bool = False, execution_ctx=None) -> int:
         count = write_opportunities(opportunities)
         log.info(f"Scan complete: {count} active opportunity(ies)")
 
+        # Send alerts for high-ROI opportunities
+        try:
+            from scanner.alerts import send_opportunity_alerts
+            send_opportunity_alerts(opportunities)
+        except Exception as e:
+            log.debug(f"Alert sending skipped: {e}")
+
         # Execute trades if enabled
         if execute and execution_ctx and opportunities:
             kalshi_client, polymarket_client, risk_limits = execution_ctx

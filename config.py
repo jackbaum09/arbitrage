@@ -98,6 +98,19 @@ GAME_MARKET_PAIRS: list[tuple[str, str]] = [
 # Execution settings
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# SNS alert settings
+# ---------------------------------------------------------------------------
+
+SNS_TOPIC_ARN: str = os.environ.get("SNS_TOPIC_ARN", "")
+ALERT_ROI_THRESHOLD: float = float(os.environ.get("ALERT_ROI_THRESHOLD", "0.02"))
+ALERTS_ENABLED: bool = os.environ.get("ALERTS_ENABLED", "false").lower() == "true"
+
+
+# ---------------------------------------------------------------------------
+# Execution settings
+# ---------------------------------------------------------------------------
+
 # Master kill switch — must be "true" AND --execute flag set to trade
 EXECUTION_ENABLED: bool = os.environ.get("EXECUTION_ENABLED", "false").lower() == "true"
 
