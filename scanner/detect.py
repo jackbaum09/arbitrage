@@ -18,11 +18,14 @@ from config import (
     KALSHI_SETTLEMENT_FEE,
     POLYMARKET_EFFECTIVE_FEE,
     MIN_ROI_THRESHOLD,
+    MIN_LIQUIDITY,
+    ORDERBOOK_TARGET_SIZE,
     FUTURES_TABLES,
     GAME_MARKET_PAIRS,
 )
 from scanner.models import Opportunity
 from scanner.match import match_outcomes
+from scanner.orderbook import get_executable_prices
 
 log = logging.getLogger(__name__)
 
@@ -89,10 +92,89 @@ def _build_opportunity(
     )
 
 
+def _enrich_with_orderbook(
+    opp: Opportunity,
+    kalshi_market_id: str | None,
+    polymarket_market_id: str | None,
+) -> Opportunity | None:
+    """
+    Fetch live order books and replace midpoint prices with executable VWAP.
+
+    Returns the enriched opportunity, or None if liquidity is insufficient.
+    On API failure, returns the opportunity unchanged with liquidity_verified=False.
+    """
+    opp.kalshi_market_id = kalshi_market_id
+    opp.polymarket_market_id = polymarket_market_id
+
+    prices = get_executable_prices(kalshi_market_id, polymarket_market_id, ORDERBOOK_TARGET_SIZE)
+    if prices is None:
+        log.debug(f"Order book fetch failed for {opp.outcome}, keeping midpoint prices")
+        return opp
+
+    # Determine executable prices for this specific strategy
+    # buy_yes_platform tells us where we're buying YES
+    if opp.buy_yes_platform == "kalshi":
+        exec_yes = prices.kalshi_yes_ask_vwap
+        exec_no = prices.polymarket_no_ask_vwap
+        yes_depth = prices.kalshi_yes_depth
+        no_depth = prices.polymarket_no_depth
+    else:
+        exec_yes = prices.polymarket_yes_ask_vwap
+        exec_no = prices.kalshi_no_ask_vwap
+        yes_depth = prices.polymarket_yes_depth
+        no_depth = prices.kalshi_no_depth
+
+    # Check depth meets minimum liquidity
+    if yes_depth < MIN_LIQUIDITY or no_depth < MIN_LIQUIDITY:
+        log.debug(
+            f"Insufficient liquidity for {opp.outcome}: "
+            f"YES depth=${yes_depth}, NO depth=${no_depth} (min=${MIN_LIQUIDITY})"
+        )
+        return None
+
+    if exec_yes is None or exec_no is None:
+        log.debug(f"No executable price available for {opp.outcome}, keeping midpoint")
+        return opp
+
+    # Preserve midpoint prices and update with executable prices
+    opp.buy_yes_midpoint = opp.buy_yes_price
+    opp.buy_no_midpoint = opp.buy_no_price
+
+    opp.buy_yes_executable_price = exec_yes
+    opp.buy_no_executable_price = exec_no
+    opp.buy_yes_depth = yes_depth
+    opp.buy_no_depth = no_depth
+    opp.max_executable_size = min(yes_depth, no_depth)
+    opp.liquidity_verified = True
+
+    # Recalculate financials with executable prices
+    opp.buy_yes_price = round(exec_yes, 4)
+    opp.buy_no_price = round(exec_no, 4)
+    opp.total_cost = round(exec_yes + exec_no, 4)
+    opp.gross_profit = round(1.0 - opp.total_cost, 4)
+
+    if opp.gross_profit <= 0:
+        return None
+
+    opp.fees = round(_calculate_fees(opp.buy_yes_platform, opp.buy_no_platform), 4)
+    opp.net_profit = round(opp.gross_profit - opp.fees, 4)
+
+    if opp.net_profit <= 0:
+        return None
+
+    opp.roi = round(opp.net_profit / opp.total_cost, 4)
+    opp.capital_required = round(opp.total_cost * 100, 2)
+
+    if opp.roi < MIN_ROI_THRESHOLD:
+        return None
+
+    return opp
+
+
 def _fetch_platform_rows(cursor, table: str, platform: str, market_type: str) -> list[dict]:
     """Fetch all rows for a given platform and market_type from a futures table."""
     cursor.execute(f"""
-        SELECT outcome, yes_price, no_price, volume, liquidity
+        SELECT outcome, yes_price, no_price, volume, liquidity, platform_market_id
         FROM {table}
         WHERE platform = %s
           AND market_type = %s
@@ -108,6 +190,7 @@ def _fetch_platform_rows(cursor, table: str, platform: str, market_type: str) ->
             "no_price": float(row[2]),
             "volume": float(row[3]) if row[3] else None,
             "liquidity": float(row[4]) if row[4] else None,
+            "platform_market_id": row[5],
         }
         for row in cursor.fetchall()
     ]
@@ -157,6 +240,8 @@ def scan_futures() -> list[Opportunity]:
                 for k_row, p_row in matched:
                     # Use the Polymarket outcome as the canonical name
                     outcome = p_row["outcome"]
+                    k_mid = k_row["platform_market_id"]
+                    p_mid = p_row["platform_market_id"]
 
                     # Strategy 1: Buy YES on Kalshi + NO on Polymarket
                     opp = _build_opportunity(
@@ -166,7 +251,9 @@ def scan_futures() -> list[Opportunity]:
                         polymarket_liquidity=p_row["liquidity"],
                     )
                     if opp:
-                        opportunities.append(opp)
+                        opp = _enrich_with_orderbook(opp, k_mid, p_mid)
+                        if opp:
+                            opportunities.append(opp)
 
                     # Strategy 2: Buy YES on Polymarket + NO on Kalshi
                     opp = _build_opportunity(
@@ -176,7 +263,9 @@ def scan_futures() -> list[Opportunity]:
                         polymarket_liquidity=p_row["liquidity"],
                     )
                     if opp:
-                        opportunities.append(opp)
+                        opp = _enrich_with_orderbook(opp, k_mid, p_mid)
+                        if opp:
+                            opportunities.append(opp)
 
     finally:
         cursor.close()
@@ -218,7 +307,9 @@ def scan_game_markets() -> list[Opportunity]:
                     p.yes_price AS p_yes,
                     p.no_price  AS p_no,
                     k.volume    AS k_volume,
-                    p.liquidity AS p_liquidity
+                    p.liquidity AS p_liquidity,
+                    k.platform_market_id AS k_market_id,
+                    p.platform_market_id AS p_market_id
                 FROM {kalshi_table} k
                 JOIN {pm_table} p
                     ON  p.platform = 'polymarket'
@@ -236,7 +327,7 @@ def scan_game_markets() -> list[Opportunity]:
             log.info(f"  {kalshi_table} <-> {pm_table}: {len(rows)} game market pairs")
 
             for row in rows:
-                matchup, team, k_yes, k_no, p_yes, p_no, k_vol, p_liq = row
+                matchup, team, k_yes, k_no, p_yes, p_no, k_vol, p_liq, k_mid, p_mid = row
                 outcome = f"{team} ({matchup})"
 
                 opp = _build_opportunity(
@@ -246,7 +337,9 @@ def scan_game_markets() -> list[Opportunity]:
                 )
                 if opp:
                     opp.sport = sport
-                    opportunities.append(opp)
+                    opp = _enrich_with_orderbook(opp, k_mid, p_mid)
+                    if opp:
+                        opportunities.append(opp)
 
                 opp = _build_opportunity(
                     kalshi_table, "game_winner", outcome,
@@ -255,7 +348,9 @@ def scan_game_markets() -> list[Opportunity]:
                 )
                 if opp:
                     opp.sport = sport
-                    opportunities.append(opp)
+                    opp = _enrich_with_orderbook(opp, k_mid, p_mid)
+                    if opp:
+                        opportunities.append(opp)
 
     finally:
         cursor.close()

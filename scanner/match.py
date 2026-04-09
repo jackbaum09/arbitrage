@@ -18,7 +18,7 @@ import re
 import logging
 from thefuzz import fuzz
 
-from scanner.teams import resolve_team
+from scanner.teams import resolve_team, NHL_TEAM_ABBREVS
 
 log = logging.getLogger(__name__)
 
@@ -45,10 +45,27 @@ def _extract_kalshi_entity(outcome: str) -> str | None:
         return m.group(1).strip()
 
     # If outcome is already a clean name (not a question), return as-is
-    if not outcome.startswith("Will ") and not outcome.startswith("Who "):
+    if not outcome.startswith("Will ") and not outcome.startswith("Who ") and not outcome.endswith("?"):
         return outcome.strip()
 
     return None
+
+
+def _extract_entity_from_ticker(market_id: str | None) -> str | None:
+    """
+    Fallback: extract team name from a Kalshi ticker suffix.
+
+    Kalshi NHL tickers use standard abbreviations as the last segment:
+      KXNHLEAST-26-BOS -> BOS -> Boston Bruins
+      KXNHL-26-NYR     -> NYR -> New York Rangers
+
+    Returns the full team name if recognized, None otherwise.
+    """
+    if not market_id:
+        return None
+
+    suffix = market_id.rsplit("-", 1)[-1].upper()
+    return NHL_TEAM_ABBREVS.get(suffix)
 
 
 def match_outcomes(
@@ -76,6 +93,11 @@ def match_outcomes(
 
     for k_row in kalshi_rows:
         entity = _extract_kalshi_entity(k_row["outcome"])
+
+        # Fallback: extract from Kalshi ticker suffix (e.g., KXNHLEAST-26-BOS)
+        if not entity:
+            entity = _extract_entity_from_ticker(k_row.get("platform_market_id"))
+
         if not entity:
             continue
 

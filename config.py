@@ -55,8 +55,26 @@ MIN_ROI_THRESHOLD: float = 0.005  # 0.5%
 # Minimum combined liquidity across both legs (in dollars)
 MIN_LIQUIDITY: float = 100.0
 
-# Scan interval
-SCAN_INTERVAL_MINUTES: int = 30
+# Scan interval (overridable via --interval CLI arg)
+SCAN_INTERVAL_MINUTES: int = 5
+
+# ---------------------------------------------------------------------------
+# Order book / liquidity settings
+# ---------------------------------------------------------------------------
+
+# Target position size ($) for VWAP executable price calculation
+ORDERBOOK_TARGET_SIZE: float = 100.0
+
+# Timeout (seconds) per order book API call
+ORDERBOOK_FETCH_TIMEOUT: float = 5.0
+
+# Max parallel API calls for order book fetching
+ORDERBOOK_MAX_WORKERS: int = 10
+
+# API base URLs for live order book data
+KALSHI_API_BASE_URL: str = "https://api.elections.kalshi.com/trade-api/v2"
+POLYMARKET_CLOB_BASE_URL: str = "https://clob.polymarket.com"
+POLYMARKET_GAMMA_BASE_URL: str = "https://gamma-api.polymarket.com"
 
 # Futures tables (contain both Kalshi and Polymarket rows)
 FUTURES_TABLES: list[str] = [
@@ -74,3 +92,27 @@ GAME_MARKET_PAIRS: list[tuple[str, str]] = [
     ("mlb_prediction_game_markets", "mlb_prediction_futures"),
     ("nhl_prediction_game_markets", "nhl_prediction_futures"),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Execution settings
+# ---------------------------------------------------------------------------
+
+# Master kill switch — must be "true" AND --execute flag set to trade
+EXECUTION_ENABLED: bool = os.environ.get("EXECUTION_ENABLED", "false").lower() == "true"
+
+# Kalshi credentials
+KALSHI_API_KEY_ID: str = os.environ.get("KALSHI_API_KEY_ID", "")
+KALSHI_PRIVATE_KEY_PATH: str = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "")
+KALSHI_API_MODE: str = os.environ.get("KALSHI_API_MODE", "demo")  # "demo" or "live"
+
+# Polymarket credentials
+POLYMARKET_PRIVATE_KEY: str = os.environ.get("POLYMARKET_PRIVATE_KEY", "")
+
+# Risk limits (conservative defaults)
+MAX_POSITION_SIZE: float = float(os.environ.get("MAX_POSITION_SIZE", "50.0"))
+MAX_TOTAL_CAPITAL: float = float(os.environ.get("MAX_TOTAL_CAPITAL", "500.0"))
+MAX_SINGLE_TRADE: float = float(os.environ.get("MAX_SINGLE_TRADE", "100.0"))
+MIN_EXECUTION_ROI: float = float(os.environ.get("MIN_EXECUTION_ROI", "0.01"))
+MAX_OPEN_POSITIONS: int = int(os.environ.get("MAX_OPEN_POSITIONS", "10"))
+FILL_TIMEOUT_SECONDS: float = float(os.environ.get("FILL_TIMEOUT_SECONDS", "30"))

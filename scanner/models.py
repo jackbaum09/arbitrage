@@ -34,6 +34,22 @@ class Opportunity:
     kalshi_volume: float | None = None
     polymarket_liquidity: float | None = None
 
+    # Executable prices (from live order book VWAP)
+    buy_yes_executable_price: float | None = None
+    buy_no_executable_price: float | None = None
+    buy_yes_depth: float | None = None          # $ fillable on YES leg
+    buy_no_depth: float | None = None           # $ fillable on NO leg
+    max_executable_size: float | None = None    # min(buy_yes_depth, buy_no_depth)
+    liquidity_verified: bool = False
+
+    # Original midpoint prices (preserved when overwritten by executable prices)
+    buy_yes_midpoint: float | None = None
+    buy_no_midpoint: float | None = None
+
+    # Platform market IDs (for order book lookups)
+    kalshi_market_id: str | None = None
+    polymarket_market_id: str | None = None
+
     # Capital requirements for a $100 notional position
     capital_required: float = 0.0
 
