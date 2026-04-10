@@ -12,10 +12,10 @@ platforms use different naming conventions.
 from __future__ import annotations
 
 import logging
+import math
 
 from config import (
     get_db_connection,
-    KALSHI_SETTLEMENT_FEE,
     POLYMARKET_EFFECTIVE_FEE,
     MIN_ROI_THRESHOLD,
     MIN_LIQUIDITY,
@@ -35,12 +35,48 @@ def _sport_from_table(table: str) -> str:
     return table.split("_")[0]
 
 
-def _calculate_fees(buy_yes_platform: str, buy_no_platform: str) -> float:
-    fee_map = {
-        "kalshi": KALSHI_SETTLEMENT_FEE,
-        "polymarket": POLYMARKET_EFFECTIVE_FEE,
-    }
-    return max(fee_map.get(buy_yes_platform, 0), fee_map.get(buy_no_platform, 0))
+def _kalshi_trading_fee(price: float) -> float:
+    """
+    Kalshi sports market trading fee per contract, in dollars.
+
+    Kalshi charges ceil(7 * P * (1 - P)) cents per contract on sports
+    markets, where P is the contract price in dollars. This is the actual
+    fee schedule (not the flat 7c worst-case bound we used previously),
+    and it's strongly asymmetric: ~2c near P=0.5, ~1c at P=0.9, 0c at the
+    extremes. Charged at trade time on every Kalshi contract regardless
+    of which side eventually wins.
+    """
+    if price <= 0 or price >= 1:
+        return 0.0
+    cents = math.ceil(7 * price * (1 - price))
+    return cents / 100.0
+
+
+def _leg_fee(platform: str, price: float) -> float:
+    """Per-contract fee for a single leg, expressed in dollars of $1 face."""
+    if platform == "kalshi":
+        return _kalshi_trading_fee(price)
+    if platform == "polymarket":
+        return POLYMARKET_EFFECTIVE_FEE
+    return 0.0
+
+
+def _calculate_fees(
+    buy_yes_platform: str,
+    buy_yes_price: float,
+    buy_no_platform: str,
+    buy_no_price: float,
+) -> float:
+    """
+    Total fees for a two-leg arb, in dollars per $1 of contract face.
+
+    Fees from the two legs come from independent sources (Kalshi trading
+    fee vs Polymarket slippage/withdrawal cost) and are both paid, so we
+    sum them rather than taking the max as the old flat-fee model did.
+    """
+    return _leg_fee(buy_yes_platform, buy_yes_price) + _leg_fee(
+        buy_no_platform, buy_no_price
+    )
 
 
 def _build_opportunity(
@@ -60,7 +96,9 @@ def _build_opportunity(
     if gross_profit <= 0:
         return None
 
-    fees = _calculate_fees(buy_yes_platform, buy_no_platform)
+    fees = _calculate_fees(
+        buy_yes_platform, buy_yes_price, buy_no_platform, buy_no_price
+    )
     net_profit = gross_profit - fees
 
     if net_profit <= 0:
@@ -179,7 +217,12 @@ def _enrich_with_orderbook(
     if opp.gross_profit <= 0:
         return None
 
-    opp.fees = round(_calculate_fees(opp.buy_yes_platform, opp.buy_no_platform), 4)
+    opp.fees = round(
+        _calculate_fees(
+            opp.buy_yes_platform, exec_yes, opp.buy_no_platform, exec_no
+        ),
+        4,
+    )
     opp.net_profit = round(opp.gross_profit - opp.fees, 4)
 
     if opp.net_profit <= 0:

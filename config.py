@@ -34,10 +34,11 @@ def get_db_connection() -> Any:
 # Fee structures (per contract / per dollar)
 # ---------------------------------------------------------------------------
 
-# Kalshi: no trading fee on most contracts, but 7c settlement fee on winning
-# contracts (i.e., if you win, you get $1 - $0.07 = $0.93 net per contract).
-# Some contracts are fee-free — we use the conservative default.
-KALSHI_SETTLEMENT_FEE: float = 0.07
+# Kalshi sports markets charge ceil(7 * P * (1 - P)) cents per contract
+# at trade time, where P is the contract price. That's strongly asymmetric
+# (~2c near P=0.5, ~1c at P=0.9, 0c at the extremes), so we compute it
+# per opportunity in scanner/detect.py:_kalshi_trading_fee instead of
+# carrying a flat-rate constant here.
 
 # Polymarket: no explicit trading fee, but there is spread cost baked into
 # the order book. We model a conservative 2% effective fee to account for
