@@ -4,9 +4,13 @@
 
 set -euo pipefail
 
-EC2_HOST="${EC2_HOST:-3.134.83.29}"
+# Defaults target the arbitrage scanner EC2, NOT the pipeline master box
+# (3.134.83.29) — that one runs prediction_markets-master and has nothing
+# to do with this repo. Override EC2_HOST/SSH_KEY if you ever need to
+# deploy this repo elsewhere.
+EC2_HOST="${EC2_HOST:-3.18.221.253}"
 EC2_USER="${EC2_USER:-ec2-user}"
-SSH_KEY="${SSH_KEY:-$HOME/Downloads/prediction_markets_pipeline_test0.pem}"
+SSH_KEY="${SSH_KEY:-$HOME/Downloads/arbitrage_test.pem}"
 REPO_DIR="/home/$EC2_USER/arbitrage"
 
 if [ ! -f "$SSH_KEY" ]; then
