@@ -1,11 +1,12 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import type { ArbitrageOpportunity, DashboardFilters } from "../lib/types";
-import { fetchOpportunities, fetchStats } from "../lib/queries";
+import type { ArbitrageOpportunity, DashboardFilters, ScannerRun } from "../lib/types";
+import { fetchOpportunities, fetchStats, fetchLatestScanRun } from "../lib/queries";
 import StatsHeader from "../components/StatsHeader";
 import Filters from "../components/Filters";
 import OpportunityTable from "../components/OpportunityTable";
+import ScannerStatusBanner from "../components/ScannerStatusBanner";
 
 const DEFAULT_FILTERS: DashboardFilters = {
   sport: "all",
@@ -19,17 +20,20 @@ export default function DashboardPage() {
   const [filters, setFilters] = useState<DashboardFilters>(DEFAULT_FILTERS);
   const [opportunities, setOpportunities] = useState<ArbitrageOpportunity[]>([]);
   const [stats, setStats] = useState<Pick<ArbitrageOpportunity, "roi" | "capital_required" | "sport" | "liquidity_verified">[]>([]);
+  const [latestRun, setLatestRun] = useState<ScannerRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
-    const [opps, statsData] = await Promise.all([
+    const [opps, statsData, run] = await Promise.all([
       fetchOpportunities(filters),
       fetchStats(),
+      fetchLatestScanRun(),
     ]);
     setOpportunities(opps);
     setStats(statsData);
+    setLatestRun(run);
     setLastRefresh(new Date());
     setLoading(false);
   }, [filters]);
@@ -46,6 +50,7 @@ export default function DashboardPage() {
 
   return (
     <div>
+      <ScannerStatusBanner latestRun={latestRun} />
       <StatsHeader opportunities={stats} />
       <Filters filters={filters} onChange={setFilters} />
 

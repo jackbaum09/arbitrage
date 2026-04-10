@@ -1,5 +1,10 @@
 import { supabase } from "./supabase";
-import type { ArbitrageOpportunity, PriceHistoryPoint, DashboardFilters } from "./types";
+import type {
+  ArbitrageOpportunity,
+  PriceHistoryPoint,
+  DashboardFilters,
+  ScannerRun,
+} from "./types";
 
 function numericRow(row: Record<string, unknown>): Record<string, unknown> {
   const numericFields = [
@@ -100,5 +105,50 @@ export async function fetchPriceHistory(
       }
     }
     return out as PriceHistoryPoint;
+  });
+}
+
+export async function fetchLatestScanRun(): Promise<ScannerRun | null> {
+  const { data, error } = await supabase
+    .from("scanner_runs")
+    .select("*")
+    .order("finished_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("Failed to fetch latest scan run:", error);
+    return null;
+  }
+  if (!data) return null;
+
+  const out = { ...data };
+  for (const f of ["duration_seconds", "max_roi"]) {
+    if (out[f] !== null && out[f] !== undefined) {
+      out[f] = Number(out[f]);
+    }
+  }
+  return out as ScannerRun;
+}
+
+export async function fetchRecentScanRuns(limit = 20): Promise<ScannerRun[]> {
+  const { data, error } = await supabase
+    .from("scanner_runs")
+    .select("*")
+    .order("finished_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    console.error("Failed to fetch recent scan runs:", error);
+    return [];
+  }
+  return (data || []).map((r) => {
+    const out = { ...r };
+    for (const f of ["duration_seconds", "max_roi"]) {
+      if (out[f] !== null && out[f] !== undefined) {
+        out[f] = Number(out[f]);
+      }
+    }
+    return out as ScannerRun;
   });
 }

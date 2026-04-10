@@ -46,6 +46,18 @@ export interface PriceHistoryPoint {
   roi_executable: number | null;
 }
 
+export interface ScannerRun {
+  id: number;
+  started_at: string;
+  finished_at: string;
+  duration_seconds: number | null;
+  opportunities_found: number;
+  opportunities_verified: number;
+  max_roi: number | null;
+  status: "success" | "error";
+  error_message: string | null;
+}
+
 export interface DashboardFilters {
   sport: string;
   status: "active" | "expired" | "all";
