@@ -73,6 +73,17 @@ def main() -> int:
         address = "(unknown)"
     print(f"wallet: {address}")
 
+    # Pull real contract addresses from the client so we never drift
+    # from what py-clob-client thinks the exchange proxies are.
+    try:
+        usdc_addr = client._client.get_collateral_address()
+        ctf_exchange = client._client.get_exchange_address(neg_risk=False)
+        ctf_exchange_neg = client._client.get_exchange_address(neg_risk=True)
+    except Exception:
+        usdc_addr = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # Polygon bridged USDC
+        ctf_exchange = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+        ctf_exchange_neg = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+
     try:
         ba = client.get_balance_allowance()
     except Exception as e:
@@ -94,22 +105,49 @@ def main() -> int:
     print()
 
     if bal <= 0:
-        print("STATUS: NOT FUNDED — wallet has no USDC.")
-        print("  Next: bridge or on-ramp USDC (Polygon PoS) to the address above.")
-        print("  Also ensure the wallet has a small MATIC balance for gas.")
+        print("STATUS: NOT FUNDED — wallet has no USDC on Polygon.")
+        print()
+        print("Next steps:")
+        print(f"  1. Send USDC (Polygon bridged, contract {usdc_addr})")
+        print(f"     to {address}")
+        print("     Common sources: Coinbase withdraw (Polygon network),")
+        print("     Binance withdraw, or a bridge like across.to / hop.exchange.")
+        print("  2. Send a small amount of MATIC (~$1 worth) to the same wallet")
+        print("     for gas. On-chain approvals and any sell txns will need it.")
+        print("  3. Re-run this script to confirm the balance lands, then")
+        print("     handle the CTF Exchange approval (see exit-code-4 path).")
         return 5
 
     if allow <= 0:
         print("STATUS: NOT APPROVED — wallet has USDC but no CTF Exchange allowance.")
-        print("  The allowance is the permission for Polymarket's exchange contract")
-        print("  to move your USDC when a trade fills. Without it, signed orders")
-        print("  revert on-chain.")
         print()
-        print("  Next: run an `approve` transaction from this wallet granting")
-        print("  USDC spending to the CTF Exchange proxy. The Polymarket docs")
-        print("  and the py-clob-client README cover the exact contract address")
-        print("  and call. Many users do this once via the Polymarket UI when")
-        print("  placing their first order there.")
+        print("The allowance is an on-chain ERC-20 approve() granting Polymarket's")
+        print("exchange proxy the right to move your USDC when a trade fills.")
+        print("Without it, signed orders submit fine but revert at settlement.")
+        print()
+        print("Contract addresses (Polygon mainnet):")
+        print(f"  USDC (bridged, spender of approve):  {usdc_addr}")
+        print(f"  CTF Exchange proxy (standard):       {ctf_exchange}")
+        print(f"  CTF Exchange proxy (neg-risk):       {ctf_exchange_neg}")
+        print()
+        print("Two paths to do the approval:")
+        print()
+        print("  Path A (easiest, no script):")
+        print("    Visit polymarket.com, connect this wallet, and place one $1")
+        print("    order on any market. The UI prompts for the USDC approval on")
+        print("    your first trade and handles the signing + submission. After")
+        print("    confirmation, re-run this script — allowance should be > 0.")
+        print()
+        print("  Path B (scripted, no UI):")
+        print("    Run deploy/approve_polymarket.py (also in this repo). It")
+        print("    dry-runs by default; pass --confirm to actually send the")
+        print("    approve transactions to both exchange proxies. Requires a")
+        print("    small MATIC balance for gas.")
+        print()
+        print("NOTE: The scanner places buy-only legs on Polymarket, so only the")
+        print("USDC→CTF approval is strictly required for arb execution. Path A")
+        print("and Path B both handle this; approving the neg-risk proxy is only")
+        print("needed if you start buying neg-risk markets (championships, etc).")
         return 4
 
     print(f"STATUS: OK — ${bal:,.2f} USDC available, ${allow:,.2f} approved for trading")
