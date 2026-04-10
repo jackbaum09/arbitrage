@@ -40,10 +40,13 @@ def get_db_connection() -> Any:
 # per opportunity in scanner/detect.py:_kalshi_trading_fee instead of
 # carrying a flat-rate constant here.
 
-# Polymarket: no explicit trading fee, but there is spread cost baked into
-# the order book. We model a conservative 2% effective fee to account for
-# slippage and the UMA resolution bond / gas costs on withdrawal.
-POLYMARKET_EFFECTIVE_FEE: float = 0.02
+# Polymarket charges no per-trade fee. Slippage is now modeled directly
+# by walking the live ask ladder via scanner/orderbook.py:get_executable_prices,
+# so charging an extra "spread proxy" here would double-count it. The 0.5c
+# we keep is a small buffer for unavoidable per-trade costs the order book
+# walk cannot see: withdrawal gas, the UMA resolution bond amortized over
+# the position lifetime, and minor settlement-side rounding.
+POLYMARKET_EFFECTIVE_FEE: float = 0.005
 
 
 # ---------------------------------------------------------------------------
