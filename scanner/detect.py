@@ -509,6 +509,24 @@ def scan_game_markets() -> list[Opportunity]:
             pm_rows = _fetch_pm_game_rows(cursor, pm_table)
             pm_index = _build_pm_game_index(pm_rows)
 
+            # Dedupe candidates by (sport, matchup, commence_date) so each
+            # game produces at most one opportunity. Kalshi lists per-team
+            # markets (one for "AZ wins", one for "PHI wins") and we test
+            # both directions on each, which surfaces up to 4 candidates per
+            # game. Of those 4, at most 2 are mathematically distinct trades
+            # and within each pair the legs are economically equivalent
+            # (same PM token, just routed through Kalshi's AZ market vs the
+            # mirror PHI market). Keeping only the highest-ROI candidate per
+            # game gives clean alerts and matches what an executor would
+            # actually do.
+            game_best: dict[tuple[str, str, str], Opportunity] = {}
+
+            def _consider(o: Opportunity, matchup: str, commence_date: str) -> None:
+                key = (sport, matchup, commence_date)
+                existing = game_best.get(key)
+                if existing is None or o.roi > existing.roi:
+                    game_best[key] = o
+
             matched_count = 0
             for k in kalshi_rows:
                 parsed = _parse_kalshi_game_matchup(k["matchup"])
@@ -547,6 +565,7 @@ def scan_game_markets() -> list[Opportunity]:
                     continue
 
                 outcome = f"{k_team} ({k['matchup']})"
+                commence_date = commence.date().isoformat()
 
                 # Strategy 1: Buy YES on Kalshi + NO on Polymarket (equiv)
                 opp = _build_opportunity(
@@ -562,7 +581,7 @@ def scan_game_markets() -> list[Opportunity]:
                         pm_outcome_token=pm_outcome_token,
                     )
                     if opp:
-                        opportunities.append(opp)
+                        _consider(opp, k["matchup"], commence_date)
 
                 # Strategy 2: Buy YES on Polymarket (equiv) + NO on Kalshi
                 opp = _build_opportunity(
@@ -578,11 +597,14 @@ def scan_game_markets() -> list[Opportunity]:
                         pm_outcome_token=pm_outcome_token,
                     )
                     if opp:
-                        opportunities.append(opp)
+                        _consider(opp, k["matchup"], commence_date)
+
+            opportunities.extend(game_best.values())
 
             log.info(
                 f"  {kalshi_table} <-> {pm_table}: "
-                f"{len(kalshi_rows)} kalshi x {len(pm_rows)} pm -> {matched_count} matched"
+                f"{len(kalshi_rows)} kalshi x {len(pm_rows)} pm -> "
+                f"{matched_count} matched, {len(game_best)} unique game opp(s)"
             )
 
     finally:
