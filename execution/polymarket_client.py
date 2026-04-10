@@ -57,24 +57,29 @@ class PolymarketClient:
         price: float,
         size: int,
         client_order_id: str | None = None,
+        outcome_side: str | None = None,
     ) -> TradeResult:
         """
         Place a limit order on Polymarket.
 
         Args:
             token_id: CLOB token ID for the outcome
-            side: "buy" or "sell"
+            side: "buy" or "sell" (the order action)
             price: Limit price (0.01 - 0.99)
             size: Number of shares
             client_order_id: UUID for deduplication
+            outcome_side: "yes" or "no" — which outcome token this token_id
+                          represents, for accurate execution tracking. If None,
+                          falls back to mapping side ("buy"->"yes", "sell"->"no").
         """
         from py_clob_client.order_builder.constants import BUY, SELL
 
         cid = client_order_id or str(uuid.uuid4())
+        tracked_outcome = outcome_side or ("yes" if side.upper() == "BUY" else "no")
         order = TradeOrder(
             platform="polymarket",
             market_id=token_id,
-            side="yes" if side.upper() == "BUY" else "no",
+            side=tracked_outcome,
             action=side.lower(),
             price=price,
             size=size,
@@ -106,6 +111,46 @@ class PolymarketClient:
         except Exception as e:
             log.error(f"Polymarket order failed: {e}")
             return TradeResult(order=order, status="error", error=str(e))
+
+    def get_order(self, order_id: str) -> dict:
+        """Get the current state of a single order (for fill polling)."""
+        try:
+            return self._client.get_order(order_id) or {}
+        except Exception as e:
+            log.warning(f"Failed to fetch Polymarket order {order_id}: {e}")
+            return {}
+
+    def get_balance_allowance(self) -> dict:
+        """
+        Return USDC balance and CTF Exchange spending allowance for the
+        wallet. Both values must be sufficient before placing an order.
+
+        Returns a dict like {"balance": "1000000", "allowance": "500000"}
+        in USDC base units (6 decimals). Convert to dollars by dividing by 1e6.
+        """
+        try:
+            return self._client.get_balance_allowance() or {}
+        except Exception as e:
+            log.error(f"Failed to fetch Polymarket balance/allowance: {e}")
+            return {}
+
+    def get_balance_dollars(self) -> float:
+        """Return USDC balance in dollars (convenience for risk checks)."""
+        ba = self.get_balance_allowance()
+        raw = ba.get("balance")
+        if raw is None:
+            return 0.0
+        try:
+            return float(raw) / 1e6
+        except (TypeError, ValueError):
+            return 0.0
+
+    def get_address(self) -> str | None:
+        """Return the wallet address derived from the private key."""
+        try:
+            return self._client.get_address()
+        except Exception:
+            return None
 
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order. Returns True if successful."""

@@ -47,38 +47,64 @@ def _resolve_polymarket_token(
 
 def _wait_for_fill(
     kalshi_client: KalshiClient | None,
+    polymarket_client: PolymarketClient | None,
     order_id: str,
     platform: str,
     timeout: float = DEFAULT_FILL_TIMEOUT,
 ) -> str:
     """
-    Poll for order fill status.
+    Poll for order fill status on either platform.
 
-    Returns final status: "filled", "partial", "resting", or "error".
-    Only Kalshi supports polling — Polymarket orders are fire-and-forget
-    for now (limit orders rest on the book).
+    Returns final status: "filled", "cancelled", "resting", or "placed"
+    when polling isn't possible.
     """
-    if platform != "kalshi" or not kalshi_client or not order_id:
+    if not order_id:
         return "placed"
 
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            data = kalshi_client.get_order(order_id)
-            order = data.get("order", {})
-            status = order.get("status", "resting")
 
-            if status == "executed":
-                return "filled"
-            if status == "canceled":
-                return "cancelled"
-            # Still resting — wait and retry
-            time.sleep(2)
-        except Exception as e:
-            log.warning(f"Error polling order {order_id}: {e}")
-            time.sleep(2)
+    if platform == "kalshi":
+        if not kalshi_client:
+            return "placed"
+        while time.time() < deadline:
+            try:
+                data = kalshi_client.get_order(order_id)
+                order = data.get("order", {})
+                status = order.get("status", "resting")
+                if status == "executed":
+                    return "filled"
+                if status == "canceled":
+                    return "cancelled"
+                time.sleep(2)
+            except Exception as e:
+                log.warning(f"Error polling Kalshi order {order_id}: {e}")
+                time.sleep(2)
+        return "resting"
 
-    return "resting"  # Timed out, still open
+    if platform == "polymarket":
+        if not polymarket_client:
+            return "placed"
+        while time.time() < deadline:
+            try:
+                data = polymarket_client.get_order(order_id)
+                # py-clob-client returns a dict with 'status' (e.g.,
+                # 'MATCHED', 'LIVE', 'CANCELED'). Map to our taxonomy.
+                status = (data.get("status") or "").upper()
+                size_matched = float(data.get("size_matched") or 0)
+                original_size = float(data.get("original_size") or 0)
+                if status == "MATCHED" or (
+                    original_size and size_matched >= original_size
+                ):
+                    return "filled"
+                if status in ("CANCELED", "CANCELLED"):
+                    return "cancelled"
+                time.sleep(2)
+            except Exception as e:
+                log.warning(f"Error polling Polymarket order {order_id}: {e}")
+                time.sleep(2)
+        return "resting"
+
+    return "placed"
 
 
 def execute_opportunity(
@@ -149,18 +175,24 @@ def execute_opportunity(
         record_execution(execution)
         return execution
 
-    # Wait for YES leg fill (Kalshi only)
-    if yes_platform == "kalshi" and yes_result.order_id:
+    # Wait for YES leg fill on whichever platform it landed on
+    if yes_result.order_id:
         fill_status = _wait_for_fill(
-            kalshi_client, yes_result.order_id, "kalshi", fill_timeout
+            kalshi_client,
+            polymarket_client,
+            yes_result.order_id,
+            yes_platform,
+            fill_timeout,
         )
         yes_result.status = fill_status
 
         if fill_status not in ("filled", "placed"):
-            # YES leg didn't fill — cancel and abort
+            # YES leg didn't fill — cancel and abort before placing the NO leg
             log.warning(f"YES leg didn't fill ({fill_status}), cancelling")
-            if kalshi_client:
+            if yes_platform == "kalshi" and kalshi_client:
                 kalshi_client.cancel_order(yes_result.order_id)
+            elif yes_platform == "polymarket" and polymarket_client:
+                polymarket_client.cancel_order(yes_result.order_id)
             execution.status = "failed"
             execution.error = f"YES leg timed out ({fill_status})"
             record_execution(execution)
@@ -262,6 +294,7 @@ def _place_leg(
             price=price,
             size=size,
             client_order_id=cid,
+            outcome_side=side,
         )
 
     else:

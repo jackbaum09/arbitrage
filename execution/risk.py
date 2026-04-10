@@ -63,10 +63,22 @@ def check_risk(
         )
 
     # 6. Individual leg size
-    yes_cost = opportunity.buy_yes_price * 100  # per-contract cost in dollars
-    no_cost = opportunity.buy_no_price * 100
-    if yes_cost > limits.max_position_size or no_cost > limits.max_position_size:
-        return False, f"Leg cost exceeds max position size ${limits.max_position_size:.2f}"
+    # Compute the number of contracts that would actually be placed,
+    # matching the sizing formula in execution/manager.py, then check the
+    # resulting per-leg dollar exposure against max_position_size.
+    max_spend = min(
+        opportunity.capital_required,
+        limits.max_single_trade,
+        opportunity.max_executable_size or limits.max_single_trade,
+    )
+    num_contracts = max(1, int(max_spend / max(opportunity.total_cost, 0.01)))
+    yes_leg_dollars = num_contracts * opportunity.buy_yes_price
+    no_leg_dollars = num_contracts * opportunity.buy_no_price
+    if yes_leg_dollars > limits.max_position_size or no_leg_dollars > limits.max_position_size:
+        return False, (
+            f"Leg dollars (YES=${yes_leg_dollars:.2f}, NO=${no_leg_dollars:.2f}) "
+            f"exceed max position size ${limits.max_position_size:.2f}"
+        )
 
     # 7. Order book depth
     if opportunity.buy_yes_depth is not None and opportunity.buy_no_depth is not None:
