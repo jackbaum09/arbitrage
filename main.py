@@ -106,8 +106,21 @@ def _init_execution():
     else:
         log.warning("Polymarket private key not configured — Polymarket trading disabled")
 
-    if not kalshi_client and not polymarket_client:
-        log.error("No trading clients available — execution disabled")
+    # Cross-platform arbs always place one leg on each platform, so BOTH
+    # clients must be armed for execution to be meaningful. A partial
+    # configuration (Kalshi only, or Polymarket only) would spam failed
+    # leg placements and potentially leave orphaned single-leg exposure
+    # — refuse to arm execution in that case.
+    if not kalshi_client or not polymarket_client:
+        missing = []
+        if not kalshi_client:
+            missing.append("Kalshi")
+        if not polymarket_client:
+            missing.append("Polymarket")
+        log.error(
+            f"Execution requires both Kalshi and Polymarket clients armed — "
+            f"missing: {', '.join(missing)}. Disabling execution for this run."
+        )
         return None
 
     return kalshi_client, polymarket_client, risk_limits
