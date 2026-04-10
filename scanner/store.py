@@ -78,6 +78,31 @@ CREATE INDEX IF NOT EXISTS idx_price_hist_key
     ON opportunity_price_history(opportunity_key, snapshot_at DESC);
 """
 
+CREATE_SCAN_RUNS_SQL = """
+CREATE TABLE IF NOT EXISTS scanner_runs (
+    id                    BIGSERIAL PRIMARY KEY,
+    started_at            TIMESTAMPTZ NOT NULL,
+    finished_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    duration_seconds      NUMERIC,
+    opportunities_found   INTEGER NOT NULL DEFAULT 0,
+    opportunities_verified INTEGER NOT NULL DEFAULT 0,
+    max_roi               NUMERIC(6,4),
+    status                TEXT NOT NULL DEFAULT 'success',
+    error_message         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_scanner_runs_finished
+    ON scanner_runs(finished_at DESC);
+"""
+
+RECORD_RUN_SQL = """
+INSERT INTO scanner_runs (
+    started_at, finished_at, duration_seconds,
+    opportunities_found, opportunities_verified, max_roi,
+    status, error_message
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
 UPSERT_SQL = """
 INSERT INTO arbitrage_opportunities (
     opportunity_key, sport, market_type, outcome,
@@ -157,8 +182,36 @@ def ensure_table() -> None:
             cur.execute(CREATE_TABLE_SQL)
             cur.execute(MIGRATE_COLUMNS_SQL)
             cur.execute(CREATE_PRICE_HISTORY_SQL)
+            cur.execute(CREATE_SCAN_RUNS_SQL)
         conn.commit()
-        log.info("arbitrage tables ready (with price history)")
+        log.info("arbitrage tables ready (with price history + scan runs)")
+    finally:
+        conn.close()
+
+
+def record_scan_run(
+    started_at: datetime,
+    finished_at: datetime,
+    opportunities: list[Opportunity],
+    status: str = "success",
+    error_message: str | None = None,
+) -> None:
+    """Log a single scan run to scanner_runs table for heartbeat / observability."""
+    duration = (finished_at - started_at).total_seconds()
+    verified = sum(1 for o in opportunities if o.liquidity_verified)
+    max_roi = max((float(o.roi) for o in opportunities), default=None)
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(RECORD_RUN_SQL, (
+                started_at, finished_at, duration,
+                len(opportunities), verified, max_roi,
+                status, error_message,
+            ))
+        conn.commit()
+    except Exception as e:
+        log.warning(f"Failed to record scan run: {e}")
     finally:
         conn.close()
 

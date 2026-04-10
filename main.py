@@ -27,8 +27,9 @@ from config import (
     MAX_OPEN_POSITIONS,
     FILL_TIMEOUT_SECONDS,
 )
+from datetime import datetime, timezone
 from scanner.detect import scan_all
-from scanner.store import ensure_table, write_opportunities
+from scanner.store import ensure_table, write_opportunities, record_scan_run
 
 log = logging.getLogger("arbitrage")
 
@@ -72,6 +73,12 @@ def _init_execution():
     if POLYMARKET_PRIVATE_KEY:
         try:
             polymarket_client = PolymarketClient(private_key=POLYMARKET_PRIVATE_KEY)
+            try:
+                addr = polymarket_client.get_address()
+                bal = polymarket_client.get_balance_dollars()
+                log.info(f"Polymarket connected — wallet {addr} balance ${bal:.2f}")
+            except Exception as e:
+                log.warning(f"Polymarket initialized but balance fetch failed: {e}")
         except Exception as e:
             log.error(f"Failed to initialize Polymarket client: {e}")
     else:
@@ -90,6 +97,8 @@ def run_scan(execute: bool = False, execution_ctx=None) -> int:
     log.info("Starting arbitrage scan")
     log.info("=" * 60)
 
+    started_at = datetime.now(timezone.utc)
+    opportunities = []
     try:
         opportunities = scan_all()
 
@@ -136,10 +145,23 @@ def run_scan(execute: bool = False, execution_ctx=None) -> int:
                 elif result.status == "risk_blocked":
                     log.debug(f"  Blocked: {opp.outcome} — {result.error}")
 
+        record_scan_run(
+            started_at=started_at,
+            finished_at=datetime.now(timezone.utc),
+            opportunities=opportunities,
+            status="success",
+        )
         return count
 
-    except Exception:
+    except Exception as e:
         log.exception("Scan failed")
+        record_scan_run(
+            started_at=started_at,
+            finished_at=datetime.now(timezone.utc),
+            opportunities=opportunities,
+            status="error",
+            error_message=str(e)[:500],
+        )
         return 0
 
 
