@@ -26,6 +26,7 @@ from config import (
 from scanner.models import Opportunity
 from scanner.match import match_outcomes
 from scanner.orderbook import get_executable_prices
+from scanner.teams import kalshi_code_to_pm_game_team
 
 log = logging.getLogger(__name__)
 
@@ -96,9 +97,18 @@ def _enrich_with_orderbook(
     opp: Opportunity,
     kalshi_market_id: str | None,
     polymarket_market_id: str | None,
+    pm_outcome_token: str = "yes",
 ) -> Opportunity | None:
     """
     Fetch live order books and replace midpoint prices with executable VWAP.
+
+    pm_outcome_token tells us which PM CLOB token represents "this outcome
+    wins". For futures and away-team game markets it's "yes" (PM's YES
+    token == this outcome wins). For home-team game markets it's "no"
+    (PM's YES token == away team wins, so the home team's "this team
+    wins" leg actually lives on PM's NO token). Without this hint the
+    enrichment would replace our flipped midpoint prices with the wrong
+    token's ask VWAP and produce nonsense opportunities.
 
     Returns the enriched opportunity, or None if liquidity is insufficient.
     On API failure, returns the opportunity unchanged with liquidity_verified=False.
@@ -111,17 +121,30 @@ def _enrich_with_orderbook(
         log.debug(f"Order book fetch failed for {opp.outcome}, keeping midpoint prices")
         return opp
 
-    # Determine executable prices for this specific strategy
-    # buy_yes_platform tells us where we're buying YES
+    # For this outcome, the PM token that represents "this outcome wins"
+    # is pm_outcome_token; the opposite token represents "this outcome loses".
+    if pm_outcome_token == "yes":
+        pm_win_ask = prices.polymarket_yes_ask_vwap
+        pm_win_depth = prices.polymarket_yes_depth
+        pm_lose_ask = prices.polymarket_no_ask_vwap
+        pm_lose_depth = prices.polymarket_no_depth
+    else:
+        pm_win_ask = prices.polymarket_no_ask_vwap
+        pm_win_depth = prices.polymarket_no_depth
+        pm_lose_ask = prices.polymarket_yes_ask_vwap
+        pm_lose_depth = prices.polymarket_yes_depth
+
+    # Determine executable prices for this specific strategy.
+    # buy_yes_platform tells us where we're buying the "this team wins" leg.
     if opp.buy_yes_platform == "kalshi":
         exec_yes = prices.kalshi_yes_ask_vwap
-        exec_no = prices.polymarket_no_ask_vwap
+        exec_no = pm_lose_ask
         yes_depth = prices.kalshi_yes_depth
-        no_depth = prices.polymarket_no_depth
+        no_depth = pm_lose_depth
     else:
-        exec_yes = prices.polymarket_yes_ask_vwap
+        exec_yes = pm_win_ask
         exec_no = prices.kalshi_no_ask_vwap
-        yes_depth = prices.polymarket_yes_depth
+        yes_depth = pm_win_depth
         no_depth = prices.kalshi_no_depth
 
     # Check depth meets minimum liquidity
@@ -172,7 +195,15 @@ def _enrich_with_orderbook(
 
 
 def _fetch_platform_rows(cursor, table: str, platform: str, market_type: str) -> list[dict]:
-    """Fetch all rows for a given platform and market_type from a futures table."""
+    """
+    Fetch all rows for a given platform and market_type from a futures table.
+
+    Allows rows where one side has hit the 0.0 floor (e.g., a team that's
+    been mathematically eliminated). Those edge cases occasionally produce
+    real arbs against the other platform's residual price, and the
+    downstream order book / depth check will filter out anything actually
+    untradeable.
+    """
     cursor.execute(f"""
         SELECT outcome, yes_price, no_price, volume, liquidity, platform_market_id
         FROM {table}
@@ -180,7 +211,7 @@ def _fetch_platform_rows(cursor, table: str, platform: str, market_type: str) ->
           AND market_type = %s
           AND yes_price IS NOT NULL
           AND no_price IS NOT NULL
-          AND yes_price > 0
+          AND (yes_price > 0 OR no_price > 0)
     """, (platform, market_type))
 
     return [
@@ -274,10 +305,154 @@ def scan_futures() -> list[Opportunity]:
     return opportunities
 
 
+def _parse_kalshi_game_matchup(matchup: str) -> tuple[str, str] | None:
+    """Parse Kalshi matchup 'AWAY @ HOME' into (away_code, home_code)."""
+    if not matchup or " @ " not in matchup:
+        return None
+    parts = matchup.split(" @ ", 1)
+    if len(parts) != 2:
+        return None
+    return parts[0].strip().upper(), parts[1].strip().upper()
+
+
+GAME_SCAN_WINDOW_HOURS = 36
+
+
+def _fetch_kalshi_game_rows(cursor, table: str) -> list[dict]:
+    """
+    Fetch moneyline-winner Kalshi game rows (one per team per game)
+    for games tipping off in the next GAME_SCAN_WINDOW_HOURS. Within
+    (matchup, team, commence_time) we pick the latest updated row to
+    avoid mixing stale snapshots.
+    """
+    cursor.execute("""
+        SELECT EXISTS (
+            SELECT FROM information_schema.columns
+            WHERE table_name = %s AND column_name = 'market_subtype'
+        )
+    """, (table,))
+    has_subtype = cursor.fetchone()[0]
+
+    subtype_filter = (
+        "(market_subtype IS NULL OR market_subtype = 'winner')"
+        if has_subtype else "TRUE"
+    )
+
+    cursor.execute(f"""
+        SELECT DISTINCT ON (matchup, team, commence_time)
+            matchup, team, yes_price, no_price, volume,
+            market_ticker, commence_time
+        FROM {table}
+        WHERE platform = 'kalshi'
+          AND team IS NOT NULL
+          AND {subtype_filter}
+          AND yes_price IS NOT NULL AND no_price IS NOT NULL
+          AND (yes_price > 0 OR no_price > 0)
+          AND commence_time IS NOT NULL
+          AND commence_time BETWEEN NOW() - INTERVAL '2 hours'
+                                AND NOW() + INTERVAL '{GAME_SCAN_WINDOW_HOURS} hours'
+        ORDER BY matchup, team, commence_time, updated_at DESC
+    """)
+    return [
+        {
+            "matchup": row[0],
+            "team": row[1],
+            "yes_price": float(row[2]),
+            "no_price": float(row[3]),
+            "volume": float(row[4]) if row[4] else None,
+            "market_id": row[5],
+            "commence_time": row[6],
+        }
+        for row in cursor.fetchall()
+    ]
+
+
+def _fetch_pm_game_rows(cursor, futures_table: str) -> list[dict]:
+    """
+    Fetch Polymarket moneyline game rows for upcoming games in the
+    scan window. Filters out spreads, totals, non-league junk (AHL,
+    soccer, KBO, etc.) so only plausible per-league moneyline rows
+    remain. De-dupes to latest updated_at per (home, away, commence_time).
+    """
+    cursor.execute(f"""
+        SELECT DISTINCT ON (home_team, away_team, commence_time)
+            matchup, outcome, home_team, away_team,
+            yes_price, no_price, liquidity, platform_market_id, commence_time
+        FROM {futures_table}
+        WHERE platform = 'polymarket'
+          AND market_type = 'game'
+          AND home_team IS NOT NULL
+          AND away_team IS NOT NULL
+          AND yes_price IS NOT NULL AND no_price IS NOT NULL
+          AND (yes_price > 0 OR no_price > 0)
+          AND commence_time IS NOT NULL
+          AND commence_time BETWEEN NOW() - INTERVAL '2 hours'
+                                AND NOW() + INTERVAL '{GAME_SCAN_WINDOW_HOURS} hours'
+          AND outcome NOT LIKE %s
+          AND outcome NOT LIKE %s
+          AND outcome NOT LIKE %s
+          AND outcome NOT LIKE %s
+          AND outcome NOT LIKE %s
+          AND outcome NOT LIKE %s
+          AND outcome NOT LIKE %s
+          AND (matchup IS NULL OR matchup NOT LIKE 'AHL%%')
+        ORDER BY home_team, away_team, commence_time, updated_at DESC
+    """, (
+        "%O/U%",
+        "%Spread%",
+        "%Both Teams%",
+        "Will %",
+        "%: Total%",
+        "%qualify%",
+        "Will there be %",
+    ))
+
+    rows = []
+    for row in cursor.fetchall():
+        rows.append({
+            "matchup": row[0],
+            "outcome": row[1],
+            "home_team": row[2],
+            "away_team": row[3],
+            "yes_price": float(row[4]),
+            "no_price": float(row[5]),
+            "liquidity": float(row[6]) if row[6] else None,
+            "market_id": row[7],
+            "commence_time": row[8],
+        })
+    return rows
+
+
+def _build_pm_game_index(rows: list[dict]) -> dict[tuple[str, str, str], dict]:
+    """
+    Index PM game rows by (away_team, home_team, commence_date) so
+    back-to-back games between the same teams on different days are
+    not conflated. commence_date is the UTC YYYY-MM-DD.
+    """
+    index: dict[tuple[str, str, str], dict] = {}
+    for r in rows:
+        commence = r.get("commence_time")
+        if commence is None:
+            continue
+        key = (
+            r["away_team"].strip(),
+            r["home_team"].strip(),
+            commence.date().isoformat(),
+        )
+        index.setdefault(key, r)
+    return index
+
+
 def scan_game_markets() -> list[Opportunity]:
     """
-    Scan game markets for arbitrage between Kalshi game tables and
-    Polymarket entries in futures tables (market_type='game').
+    Scan per-game moneyline markets for arbitrage.
+
+    Kalshi stores one row per team per game ("winner" subtype) with a
+    3-letter team code. Polymarket stores one row per (game, market) where
+    `yes_price` = away team wins and `no_price` = home team wins on
+    moneyline rows. We translate each Kalshi team code to the form PM uses
+    for that sport (codes for NBA, nicknames for NHL, full names for MLB)
+    and look up the matching PM game by (away, home) tuple.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -285,72 +460,87 @@ def scan_game_markets() -> list[Opportunity]:
 
     try:
         for kalshi_table, pm_table in GAME_MARKET_PAIRS:
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.columns
-                    WHERE table_name = %s AND column_name = 'market_subtype'
-                )
-            """, (kalshi_table,))
-            has_subtype = cursor.fetchone()[0]
-
-            subtype_filter = (
-                "(k.market_subtype IS NULL OR k.market_subtype = 'winner')"
-                if has_subtype else "TRUE"
-            )
-
-            cursor.execute(f"""
-                SELECT
-                    k.matchup,
-                    k.team,
-                    k.yes_price AS k_yes,
-                    k.no_price  AS k_no,
-                    p.yes_price AS p_yes,
-                    p.no_price  AS p_no,
-                    k.volume    AS k_volume,
-                    p.liquidity AS p_liquidity,
-                    k.market_ticker AS k_market_id,
-                    p.platform_market_id AS p_market_id
-                FROM {kalshi_table} k
-                JOIN {pm_table} p
-                    ON  p.platform = 'polymarket'
-                    AND p.market_type = 'game'
-                    AND REPLACE(k.matchup, ' @ ', ' vs ') = p.matchup
-                    AND LOWER(TRIM(p.outcome)) LIKE '%%' || LOWER(k.team) || '%%'
-                WHERE {subtype_filter}
-                  AND k.yes_price IS NOT NULL AND k.no_price IS NOT NULL
-                  AND p.yes_price IS NOT NULL AND p.no_price IS NOT NULL
-                  AND k.yes_price > 0 AND p.yes_price > 0
-            """)
-
             sport = _sport_from_table(kalshi_table)
-            rows = cursor.fetchall()
-            log.info(f"  {kalshi_table} <-> {pm_table}: {len(rows)} game market pairs")
 
-            for row in rows:
-                matchup, team, k_yes, k_no, p_yes, p_no, k_vol, p_liq, k_mid, p_mid = row
-                outcome = f"{team} ({matchup})"
+            kalshi_rows = _fetch_kalshi_game_rows(cursor, kalshi_table)
+            pm_rows = _fetch_pm_game_rows(cursor, pm_table)
+            pm_index = _build_pm_game_index(pm_rows)
 
+            matched_count = 0
+            for k in kalshi_rows:
+                parsed = _parse_kalshi_game_matchup(k["matchup"])
+                if not parsed:
+                    continue
+                away_code, home_code = parsed
+                k_team = k["team"].strip().upper()
+
+                away_pm = kalshi_code_to_pm_game_team(away_code, sport)
+                home_pm = kalshi_code_to_pm_game_team(home_code, sport)
+                if not away_pm or not home_pm:
+                    continue
+
+                commence = k.get("commence_time")
+                if commence is None:
+                    continue
+                pm_row = pm_index.get(
+                    (away_pm, home_pm, commence.date().isoformat())
+                )
+                if pm_row is None:
+                    continue
+                matched_count += 1
+
+                # Determine which PM token represents "this team wins":
+                # PM yes_price = away team wins, no_price = home team wins.
+                if k_team == away_code:
+                    pm_yes_equiv = pm_row["yes_price"]  # "this team wins"
+                    pm_no_equiv = pm_row["no_price"]    # "this team loses"
+                    pm_outcome_token = "yes"
+                elif k_team == home_code:
+                    pm_yes_equiv = pm_row["no_price"]   # home team wins -> no on PM
+                    pm_no_equiv = pm_row["yes_price"]
+                    pm_outcome_token = "no"
+                else:
+                    # Team doesn't match either side of the parsed matchup
+                    continue
+
+                outcome = f"{k_team} ({k['matchup']})"
+
+                # Strategy 1: Buy YES on Kalshi + NO on Polymarket (equiv)
                 opp = _build_opportunity(
                     kalshi_table, "game_winner", outcome,
-                    "kalshi", k_yes, "polymarket", p_no,
-                    kalshi_volume=k_vol, polymarket_liquidity=p_liq,
+                    "kalshi", k["yes_price"], "polymarket", pm_no_equiv,
+                    kalshi_volume=k.get("volume"),
+                    polymarket_liquidity=pm_row.get("liquidity"),
                 )
                 if opp:
                     opp.sport = sport
-                    opp = _enrich_with_orderbook(opp, k_mid, p_mid)
+                    opp = _enrich_with_orderbook(
+                        opp, k["market_id"], pm_row["market_id"],
+                        pm_outcome_token=pm_outcome_token,
+                    )
                     if opp:
                         opportunities.append(opp)
 
+                # Strategy 2: Buy YES on Polymarket (equiv) + NO on Kalshi
                 opp = _build_opportunity(
                     kalshi_table, "game_winner", outcome,
-                    "polymarket", p_yes, "kalshi", k_no,
-                    kalshi_volume=k_vol, polymarket_liquidity=p_liq,
+                    "polymarket", pm_yes_equiv, "kalshi", k["no_price"],
+                    kalshi_volume=k.get("volume"),
+                    polymarket_liquidity=pm_row.get("liquidity"),
                 )
                 if opp:
                     opp.sport = sport
-                    opp = _enrich_with_orderbook(opp, k_mid, p_mid)
+                    opp = _enrich_with_orderbook(
+                        opp, k["market_id"], pm_row["market_id"],
+                        pm_outcome_token=pm_outcome_token,
+                    )
                     if opp:
                         opportunities.append(opp)
+
+            log.info(
+                f"  {kalshi_table} <-> {pm_table}: "
+                f"{len(kalshi_rows)} kalshi x {len(pm_rows)} pm -> {matched_count} matched"
+            )
 
     finally:
         cursor.close()

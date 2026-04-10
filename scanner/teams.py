@@ -262,6 +262,111 @@ NHL_TEAM_ABBREVS: dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Kalshi team code -> Polymarket "game" table team identifier.
+#
+# Polymarket's home_team / away_team columns on game-market rows use a
+# different string per sport:
+#   NBA: 3-letter codes (same as Kalshi) — e.g., "BKN", "LAL"
+#   NHL: nicknames — e.g., "Rangers", "Maple Leafs", "Utah" (special)
+#   MLB: full team names — e.g., "Boston Red Sox"
+# These maps translate Kalshi's code directly to the form PM uses so the
+# game-market scanner can build exact-match joins instead of substring
+# LIKE queries.
+# ---------------------------------------------------------------------------
+
+NBA_KALSHI_TO_PM_GAME: dict[str, str] = {
+    code: code for code in [
+        "ATL", "BKN", "BOS", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
+        "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK",
+        "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS",
+    ]
+}
+
+NHL_KALSHI_TO_PM_GAME: dict[str, str] = {
+    "ANA": "Ducks",
+    "BOS": "Bruins",
+    "BUF": "Sabres",
+    "CAR": "Hurricanes",
+    "CBJ": "Blue Jackets",
+    "CGY": "Flames",
+    "CHI": "Blackhawks",
+    "COL": "Avalanche",
+    "DAL": "Stars",
+    "DET": "Red Wings",
+    "EDM": "Oilers",
+    "FLA": "Panthers",
+    "LA": "Kings",
+    "MIN": "Wild",
+    "MTL": "Canadiens",
+    "NJ": "Devils",
+    "NSH": "Predators",
+    "NYI": "Islanders",
+    "NYR": "Rangers",
+    "OTT": "Senators",
+    "PHI": "Flyers",
+    "PIT": "Penguins",
+    "SEA": "Kraken",
+    "SJ": "Sharks",
+    "STL": "Blues",
+    "TB": "Lightning",
+    "TOR": "Maple Leafs",
+    "UTA": "Utah",  # PM stores Utah Mammoth as just "Utah"
+    "VAN": "Canucks",
+    "VGK": "Golden Knights",
+    "WPG": "Jets",
+    "WSH": "Capitals",
+}
+
+MLB_KALSHI_TO_PM_GAME: dict[str, str] = {
+    "ATH": "Athletics",
+    "ATL": "Atlanta Braves",
+    "AZ": "Arizona Diamondbacks",
+    "BAL": "Baltimore Orioles",
+    "BOS": "Boston Red Sox",
+    "CHC": "Chicago Cubs",
+    "CIN": "Cincinnati Reds",
+    "CLE": "Cleveland Guardians",
+    "COL": "Colorado Rockies",
+    "CWS": "Chicago White Sox",
+    "DET": "Detroit Tigers",
+    "HOU": "Houston Astros",
+    "KC": "Kansas City Royals",
+    "LAA": "Los Angeles Angels",
+    "LAD": "Los Angeles Dodgers",
+    "MIA": "Miami Marlins",
+    "MIL": "Milwaukee Brewers",
+    "MIN": "Minnesota Twins",
+    "NYM": "New York Mets",
+    "NYY": "New York Yankees",
+    "PHI": "Philadelphia Phillies",
+    "PIT": "Pittsburgh Pirates",
+    "SD": "San Diego Padres",
+    "SEA": "Seattle Mariners",
+    "SF": "San Francisco Giants",
+    "STL": "St. Louis Cardinals",
+    "TB": "Tampa Bay Rays",
+    "TEX": "Texas Rangers",
+    "TOR": "Toronto Blue Jays",
+    "WSH": "Washington Nationals",
+}
+
+_GAME_CODE_MAPS: dict[str, dict[str, str]] = {
+    "nba": NBA_KALSHI_TO_PM_GAME,
+    "nhl": NHL_KALSHI_TO_PM_GAME,
+    "mlb": MLB_KALSHI_TO_PM_GAME,
+}
+
+
+def kalshi_code_to_pm_game_team(code: str, sport: str) -> str | None:
+    """Translate a Kalshi team code to the string Polymarket uses in its
+    game-market home_team / away_team columns for the given sport."""
+    table = _GAME_CODE_MAPS.get(sport.lower())
+    if not table:
+        return None
+    return table.get(code.upper())
+
+
 def resolve_team(kalshi_short: str, sport: str | None = None) -> str | None:
     """
     Resolve a Kalshi short team name to the full Polymarket team name.
