@@ -8,7 +8,10 @@ Requires a funded Polygon wallet with USDC.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
+
+import requests
 
 from execution.models import TradeOrder, TradeResult
 
@@ -18,6 +21,66 @@ CLOB_HOST = "https://clob.polymarket.com"
 
 # Chain ID for Polygon mainnet
 POLYGON_CHAIN_ID = 137
+
+# Retry / backoff for transient failures on the CLOB HTTP API.
+# IMPORTANT: we only retry on network-layer failures and explicit 5xx, because
+# retrying a successfully-signed order that the server *did* receive would
+# risk a double-fill (the SDK re-signs on each call with a fresh salt, so
+# server-side dedup doesn't help).
+_POLY_MAX_RETRIES = 3
+_POLY_BACKOFF_BASE = 0.5  # seconds
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """
+    Classify a py-clob-client exception as transient (safe-ish to retry).
+
+    Retries are only safe when we're confident the server never accepted
+    the order: connection errors, timeouts, or 5xx responses. 4xx (bad
+    request, insufficient balance, auth) and ambiguous failures must not
+    retry.
+    """
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        return True
+    if isinstance(exc, requests.HTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is not None and 500 <= resp.status_code < 600:
+            return True
+        return False
+    # py-clob-client sometimes wraps errors as plain Exception with a
+    # string body — best-effort match on common transient markers.
+    msg = str(exc).lower()
+    return any(tok in msg for tok in ("timeout", "timed out", "connection reset",
+                                       "bad gateway", "service unavailable",
+                                       "gateway timeout", "temporarily"))
+
+
+def _with_retries(label: str, fn, *, max_retries: int = _POLY_MAX_RETRIES):
+    """
+    Invoke fn() with exponential backoff on transient errors.
+
+    Non-transient errors raise immediately. After max_retries attempts the
+    last transient exception is re-raised so the caller can surface it.
+    """
+    delay = _POLY_BACKOFF_BASE
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if not _is_transient_error(exc):
+                raise
+            last_exc = exc
+            if attempt == max_retries:
+                break
+            log.warning(
+                f"Polymarket {label} transient error (attempt {attempt}/{max_retries}): "
+                f"{exc} — retrying in {delay:.1f}s"
+            )
+            time.sleep(delay)
+            delay *= 2
+    assert last_exc is not None
+    raise last_exc
 
 
 class PolymarketClient:
@@ -95,7 +158,12 @@ class PolymarketClient:
                 size=size,
                 side=clob_side,
             )
-            resp = self._client.post_order(signed_order)
+            # Retry only the network POST. Re-signing would change the salt
+            # and turn "retry same order" into "place a second order", so we
+            # keep the signed_order stable and only retry the HTTP call.
+            resp = _with_retries(
+                "post_order", lambda: self._client.post_order(signed_order)
+            )
 
             order_id = None
             if isinstance(resp, dict):
@@ -115,7 +183,9 @@ class PolymarketClient:
     def get_order(self, order_id: str) -> dict:
         """Get the current state of a single order (for fill polling)."""
         try:
-            return self._client.get_order(order_id) or {}
+            return _with_retries(
+                "get_order", lambda: self._client.get_order(order_id)
+            ) or {}
         except Exception as e:
             log.warning(f"Failed to fetch Polymarket order {order_id}: {e}")
             return {}

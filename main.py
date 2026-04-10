@@ -75,10 +75,32 @@ def _init_execution():
             polymarket_client = PolymarketClient(private_key=POLYMARKET_PRIVATE_KEY)
             try:
                 addr = polymarket_client.get_address()
-                bal = polymarket_client.get_balance_dollars()
-                log.info(f"Polymarket connected — wallet {addr} balance ${bal:.2f}")
+                ba = polymarket_client.get_balance_allowance()
+                bal_raw = ba.get("balance")
+                allow_raw = ba.get("allowance")
+                bal_dollars = float(bal_raw) / 1e6 if bal_raw is not None else 0.0
+                allow_dollars = float(allow_raw) / 1e6 if allow_raw is not None else 0.0
+                log.info(
+                    f"Polymarket connected — wallet {addr} "
+                    f"balance ${bal_dollars:.2f} USDC, "
+                    f"CTF Exchange allowance ${allow_dollars:.2f}"
+                )
+                # Pre-flight: require a non-zero USDC allowance to the CTF Exchange
+                # contract. Without this, create_order will sign fine but fills
+                # will revert on-chain. Fail loud here instead of at trade time.
+                if allow_dollars <= 0:
+                    log.error(
+                        "Polymarket USDC allowance to CTF Exchange is $0 — "
+                        "wallet must approve USDC spending before trading. "
+                        "Disabling Polymarket trading for this run."
+                    )
+                    polymarket_client = None
             except Exception as e:
-                log.warning(f"Polymarket initialized but balance fetch failed: {e}")
+                log.error(
+                    f"Polymarket balance/allowance fetch failed: {e} — "
+                    "disabling Polymarket trading for this run."
+                )
+                polymarket_client = None
         except Exception as e:
             log.error(f"Failed to initialize Polymarket client: {e}")
     else:
@@ -126,24 +148,41 @@ def run_scan(execute: bool = False, execution_ctx=None) -> int:
         if execute and execution_ctx and opportunities:
             kalshi_client, polymarket_client, risk_limits = execution_ctx
             from execution.manager import execute_opportunity
+            from execution.risk import fetch_balances
 
-            log.info(f"Evaluating {len(opportunities)} opportunities for execution...")
-            for opp in opportunities:
-                result = execute_opportunity(
-                    opp,
-                    kalshi_client=kalshi_client,
-                    polymarket_client=polymarket_client,
-                    risk_limits=risk_limits,
-                    fill_timeout=FILL_TIMEOUT_SECONDS,
+            # Fetch live per-platform balances once at the start of the
+            # execute loop. If either configured client fails, skip execution
+            # for this scan — safer than trading against a stale snapshot.
+            balances = fetch_balances(kalshi_client, polymarket_client)
+            if balances is None:
+                log.error(
+                    "Live balance fetch failed — skipping execution for this scan"
                 )
-                if result.status == "success":
-                    log.info(
-                        f"  TRADED: {opp.outcome} | "
-                        f"cost=${result.total_cost:.2f} | "
-                        f"expected profit=${result.expected_profit:.2f}"
+            else:
+                log.info(
+                    f"Live balances: Kalshi=${balances.kalshi:.2f}, "
+                    f"Polymarket=${balances.polymarket:.2f}"
+                )
+                log.info(
+                    f"Evaluating {len(opportunities)} opportunities for execution..."
+                )
+                for opp in opportunities:
+                    result = execute_opportunity(
+                        opp,
+                        kalshi_client=kalshi_client,
+                        polymarket_client=polymarket_client,
+                        risk_limits=risk_limits,
+                        fill_timeout=FILL_TIMEOUT_SECONDS,
+                        balances=balances,
                     )
-                elif result.status == "risk_blocked":
-                    log.debug(f"  Blocked: {opp.outcome} — {result.error}")
+                    if result.status == "success":
+                        log.info(
+                            f"  TRADED: {opp.outcome} | "
+                            f"cost=${result.total_cost:.2f} | "
+                            f"expected profit=${result.expected_profit:.2f}"
+                        )
+                    elif result.status == "risk_blocked":
+                        log.debug(f"  Blocked: {opp.outcome} — {result.error}")
 
         record_scan_run(
             started_at=started_at,

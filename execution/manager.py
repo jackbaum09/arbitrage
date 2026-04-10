@@ -16,7 +16,7 @@ from scanner.orderbook import get_polymarket_token_ids
 from execution.models import TradeOrder, TradeResult, ArbitrageExecution
 from execution.kalshi_client import KalshiClient
 from execution.polymarket_client import PolymarketClient
-from execution.risk import RiskLimits, check_risk
+from execution.risk import BalanceSnapshot, RiskLimits, check_risk
 from execution.store import record_execution, get_open_execution_count, get_deployed_capital
 
 log = logging.getLogger(__name__)
@@ -113,6 +113,7 @@ def execute_opportunity(
     polymarket_client: PolymarketClient | None,
     risk_limits: RiskLimits,
     fill_timeout: float = DEFAULT_FILL_TIMEOUT,
+    balances: BalanceSnapshot | None = None,
 ) -> ArbitrageExecution:
     """
     Execute a two-leg arbitrage trade.
@@ -125,7 +126,7 @@ def execute_opportunity(
     # ----- Risk checks -----
     deployed = get_deployed_capital()
     open_count = get_open_execution_count()
-    allowed, reason = check_risk(opp, deployed, open_count, risk_limits)
+    allowed, reason = check_risk(opp, deployed, open_count, risk_limits, balances)
 
     if not allowed:
         log.info(f"Risk blocked: {opp.outcome} — {reason}")
@@ -226,6 +227,12 @@ def execute_opportunity(
         (opp.buy_yes_price + opp.buy_no_price) * num_contracts, 2
     )
     execution.expected_profit = round(opp.net_profit * num_contracts, 2)
+
+    # Debit the live balance snapshot so subsequent opportunities in this
+    # scan see accurate remaining balance without re-fetching.
+    if balances is not None:
+        balances.debit(yes_platform, num_contracts * opp.buy_yes_price)
+        balances.debit(no_platform, num_contracts * opp.buy_no_price)
 
     log.info(
         f"Execution SUCCESS: {opp.outcome} | "

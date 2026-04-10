@@ -95,6 +95,85 @@ def fetch_polymarket_orderbook(token_id: str) -> dict | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Kalshi series fee lookup (cached per process lifetime)
+# ---------------------------------------------------------------------------
+
+# Kalshi's per-market endpoint does NOT expose a trading_fee field. Fee
+# structure lives on the SERIES endpoint and applies uniformly to every
+# market in that series. Key fields:
+#   - fee_multiplier: scales the default quadratic coefficient (1.0 for
+#     normal sports markets, 0 for fee-free promotional series)
+#   - fee_type: e.g. "quadratic_with_maker_fees"
+# We cache per series ticker (not per market ticker) since most scans touch
+# the same handful of series repeatedly and the series config rarely changes.
+
+_series_fee_cache: dict[str, dict] = {}
+
+
+def _series_ticker_from_market(ticker: str) -> str | None:
+    """
+    Extract a Kalshi series ticker from a market ticker.
+
+    Kalshi market tickers follow '{SERIES}-{EVENT}-{MARKET}' (e.g.,
+    'KXNBA-26-WAS' → series 'KXNBA'). Returns None if the ticker is empty
+    or malformed.
+    """
+    if not ticker:
+        return None
+    head = ticker.split("-", 1)[0]
+    return head or None
+
+
+def fetch_kalshi_series_fee(series_ticker: str) -> dict:
+    """
+    Fetch fee configuration for a Kalshi series. Returns a dict with keys:
+        fee_multiplier (float, default 1.0 on failure)
+        fee_type (str, default "quadratic" on failure)
+
+    Cached per process lifetime. Always returns a dict (never None) so
+    callers can use it unconditionally — on fetch failure we return the
+    default (multiplier=1.0) which matches the existing hardcoded formula.
+    """
+    cached = _series_fee_cache.get(series_ticker)
+    if cached is not None:
+        return cached
+
+    default = {"fee_multiplier": 1.0, "fee_type": "quadratic"}
+
+    try:
+        resp = requests.get(
+            f"{KALSHI_API_BASE_URL}/series/{series_ticker}",
+            timeout=ORDERBOOK_FETCH_TIMEOUT,
+        )
+        resp.raise_for_status()
+        series = resp.json().get("series", {}) or {}
+        result = {
+            "fee_multiplier": float(series.get("fee_multiplier", 1.0) or 0.0),
+            "fee_type": str(series.get("fee_type") or "quadratic"),
+        }
+        _series_fee_cache[series_ticker] = result
+        return result
+    except Exception as e:
+        log.warning(
+            f"Kalshi series fee fetch failed for {series_ticker}: {e} "
+            "(falling back to default multiplier=1.0)"
+        )
+        _series_fee_cache[series_ticker] = default
+        return default
+
+
+def get_kalshi_fee_multiplier(market_ticker: str | None) -> float:
+    """
+    Convenience wrapper: given a market ticker, return the series-level
+    fee multiplier. Returns 1.0 (default/no-op) on any failure.
+    """
+    series = _series_ticker_from_market(market_ticker or "")
+    if not series:
+        return 1.0
+    return fetch_kalshi_series_fee(series).get("fee_multiplier", 1.0)
+
+
 def fetch_kalshi_orderbook(ticker: str) -> dict | None:
     """
     Fetch the order book from Kalshi API.

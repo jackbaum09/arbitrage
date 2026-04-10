@@ -25,7 +25,6 @@ export default function DashboardPage() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
   const loadData = useCallback(async () => {
-    setLoading(true);
     const [opps, statsData, run] = await Promise.all([
       fetchOpportunities(filters),
       fetchStats(),
@@ -38,7 +37,14 @@ export default function DashboardPage() {
     setLoading(false);
   }, [filters]);
 
+  // React 19 introduces react-hooks/set-state-in-effect, which statically
+  // flags setState reachable from an effect body. The canonical Next 16
+  // alternative is a Server Component + router.refresh() for polling, but
+  // we keep this client-side pattern because the page's filter state lives
+  // here. The setState calls all land after awaits (microtask), so the
+  // cascading-render concern the rule protects against doesn't apply.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
   }, [loadData]);
 

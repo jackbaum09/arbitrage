@@ -25,7 +25,7 @@ from config import (
 )
 from scanner.models import Opportunity
 from scanner.match import match_outcomes
-from scanner.orderbook import get_executable_prices
+from scanner.orderbook import get_executable_prices, get_kalshi_fee_multiplier
 from scanner.teams import kalshi_code_to_pm_game_team
 
 log = logging.getLogger(__name__)
@@ -35,27 +35,30 @@ def _sport_from_table(table: str) -> str:
     return table.split("_")[0]
 
 
-def _kalshi_trading_fee(price: float) -> float:
+def _kalshi_trading_fee(price: float, fee_multiplier: float = 1.0) -> float:
     """
     Kalshi sports market trading fee per contract, in dollars.
 
-    Kalshi charges ceil(7 * P * (1 - P)) cents per contract on sports
-    markets, where P is the contract price in dollars. This is the actual
-    fee schedule (not the flat 7c worst-case bound we used previously),
-    and it's strongly asymmetric: ~2c near P=0.5, ~1c at P=0.9, 0c at the
-    extremes. Charged at trade time on every Kalshi contract regardless
-    of which side eventually wins.
+    Kalshi charges ceil(7 * M * P * (1 - P)) cents per contract on sports
+    markets, where P is the contract price in dollars and M is the series-
+    level fee multiplier fetched from the Kalshi series endpoint. For
+    standard sports series M=1.0, yielding the asymmetric ~2c-near-P=0.5 /
+    ~1c-at-P=0.9 / 0c-at-extremes schedule. Promotional fee-free series
+    expose M=0.0, which produces a flat zero fee. Charged at trade time
+    on every Kalshi contract regardless of which side eventually wins.
     """
     if price <= 0 or price >= 1:
         return 0.0
-    cents = math.ceil(7 * price * (1 - price))
+    if fee_multiplier <= 0:
+        return 0.0
+    cents = math.ceil(7 * fee_multiplier * price * (1 - price))
     return cents / 100.0
 
 
-def _leg_fee(platform: str, price: float) -> float:
+def _leg_fee(platform: str, price: float, kalshi_fee_multiplier: float = 1.0) -> float:
     """Per-contract fee for a single leg, expressed in dollars of $1 face."""
     if platform == "kalshi":
-        return _kalshi_trading_fee(price)
+        return _kalshi_trading_fee(price, kalshi_fee_multiplier)
     if platform == "polymarket":
         return POLYMARKET_EFFECTIVE_FEE
     return 0.0
@@ -66,6 +69,7 @@ def _calculate_fees(
     buy_yes_price: float,
     buy_no_platform: str,
     buy_no_price: float,
+    kalshi_fee_multiplier: float = 1.0,
 ) -> float:
     """
     Total fees for a two-leg arb, in dollars per $1 of contract face.
@@ -73,9 +77,10 @@ def _calculate_fees(
     Fees from the two legs come from independent sources (Kalshi trading
     fee vs Polymarket slippage/withdrawal cost) and are both paid, so we
     sum them rather than taking the max as the old flat-fee model did.
+    The Kalshi multiplier is applied to whichever leg lands on Kalshi.
     """
-    return _leg_fee(buy_yes_platform, buy_yes_price) + _leg_fee(
-        buy_no_platform, buy_no_price
+    return _leg_fee(buy_yes_platform, buy_yes_price, kalshi_fee_multiplier) + _leg_fee(
+        buy_no_platform, buy_no_price, kalshi_fee_multiplier
     )
 
 
@@ -89,6 +94,7 @@ def _build_opportunity(
     buy_no_price: float,
     kalshi_volume: float | None = None,
     polymarket_liquidity: float | None = None,
+    kalshi_ticker: str | None = None,
 ) -> Opportunity | None:
     total_cost = buy_yes_price + buy_no_price
     gross_profit = 1.0 - total_cost
@@ -96,8 +102,13 @@ def _build_opportunity(
     if gross_profit <= 0:
         return None
 
+    kalshi_fee_multiplier = get_kalshi_fee_multiplier(kalshi_ticker)
     fees = _calculate_fees(
-        buy_yes_platform, buy_yes_price, buy_no_platform, buy_no_price
+        buy_yes_platform,
+        buy_yes_price,
+        buy_no_platform,
+        buy_no_price,
+        kalshi_fee_multiplier,
     )
     net_profit = gross_profit - fees
 
@@ -219,7 +230,11 @@ def _enrich_with_orderbook(
 
     opp.fees = round(
         _calculate_fees(
-            opp.buy_yes_platform, exec_yes, opp.buy_no_platform, exec_no
+            opp.buy_yes_platform,
+            exec_yes,
+            opp.buy_no_platform,
+            exec_no,
+            get_kalshi_fee_multiplier(kalshi_market_id),
         ),
         4,
     )
@@ -323,6 +338,7 @@ def scan_futures() -> list[Opportunity]:
                         "kalshi", k_row["yes_price"], "polymarket", p_row["no_price"],
                         kalshi_volume=k_row["volume"],
                         polymarket_liquidity=p_row["liquidity"],
+                        kalshi_ticker=k_mid,
                     )
                     if opp:
                         opp = _enrich_with_orderbook(opp, k_mid, p_mid)
@@ -335,6 +351,7 @@ def scan_futures() -> list[Opportunity]:
                         "polymarket", p_row["yes_price"], "kalshi", k_row["no_price"],
                         kalshi_volume=k_row["volume"],
                         polymarket_liquidity=p_row["liquidity"],
+                        kalshi_ticker=k_mid,
                     )
                     if opp:
                         opp = _enrich_with_orderbook(opp, k_mid, p_mid)
@@ -573,6 +590,7 @@ def scan_game_markets() -> list[Opportunity]:
                     "kalshi", k["yes_price"], "polymarket", pm_no_equiv,
                     kalshi_volume=k.get("volume"),
                     polymarket_liquidity=pm_row.get("liquidity"),
+                    kalshi_ticker=k["market_id"],
                 )
                 if opp:
                     opp.sport = sport
@@ -589,6 +607,7 @@ def scan_game_markets() -> list[Opportunity]:
                     "polymarket", pm_yes_equiv, "kalshi", k["no_price"],
                     kalshi_volume=k.get("volume"),
                     polymarket_liquidity=pm_row.get("liquidity"),
+                    kalshi_ticker=k["market_id"],
                 )
                 if opp:
                     opp.sport = sport

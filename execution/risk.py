@@ -8,9 +8,14 @@ defaults — adjust via config.py as you gain confidence in the system.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from scanner.models import Opportunity
+
+if TYPE_CHECKING:
+    from execution.kalshi_client import KalshiClient
+    from execution.polymarket_client import PolymarketClient
 
 log = logging.getLogger(__name__)
 
@@ -27,16 +32,71 @@ class RiskLimits:
     require_liquidity_verified: bool = True  # only trade verified opportunities
 
 
+@dataclass
+class BalanceSnapshot:
+    """
+    Live per-platform wallet balances captured at the start of an execute loop.
+
+    Each run_scan() call fetches this once from the live APIs; execute_opportunity
+    debits `remaining` after successful placements so subsequent opportunities in
+    the same scan see the correct available balance without re-fetching.
+    """
+
+    kalshi: float = 0.0       # available USD on Kalshi
+    polymarket: float = 0.0   # available USDC on Polymarket
+    remaining: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.remaining:
+            self.remaining = {"kalshi": self.kalshi, "polymarket": self.polymarket}
+
+    def debit(self, platform: str, amount: float) -> None:
+        self.remaining[platform] = max(0.0, self.remaining.get(platform, 0.0) - amount)
+
+
+def fetch_balances(
+    kalshi_client: "KalshiClient | None",
+    polymarket_client: "PolymarketClient | None",
+) -> BalanceSnapshot | None:
+    """
+    Fetch live balances from both platforms. Returns None if either configured
+    client fails — callers should treat that as "do not execute this scan".
+    """
+    kalshi_bal = 0.0
+    poly_bal = 0.0
+
+    if kalshi_client is not None:
+        try:
+            kalshi_bal = float(kalshi_client.get_balance() or 0.0)
+        except Exception as e:
+            log.error(f"Kalshi balance fetch failed: {e}")
+            return None
+
+    if polymarket_client is not None:
+        try:
+            poly_bal = float(polymarket_client.get_balance_dollars() or 0.0)
+        except Exception as e:
+            log.error(f"Polymarket balance fetch failed: {e}")
+            return None
+
+    return BalanceSnapshot(kalshi=kalshi_bal, polymarket=poly_bal)
+
+
 def check_risk(
     opportunity: Opportunity,
     deployed_capital: float,
     open_position_count: int,
     limits: RiskLimits,
+    balances: BalanceSnapshot | None = None,
 ) -> tuple[bool, str]:
     """
     Run all pre-trade risk checks.
 
     Returns (allowed, reason). If allowed is False, reason explains why.
+
+    When `balances` is provided, each leg's dollar cost must fit within the
+    live remaining balance on its target platform. When `balances` is None,
+    the live-balance check is skipped (scan-only mode or balance fetch failed).
     """
     # 1. Liquidity verification
     if limits.require_liquidity_verified and not opportunity.liquidity_verified:
@@ -85,5 +145,31 @@ def check_risk(
         min_depth = min(opportunity.buy_yes_depth, opportunity.buy_no_depth)
         if min_depth < trade_cost:
             return False, f"Order book depth ${min_depth:.2f} insufficient for trade ${trade_cost:.2f}"
+
+    # 8. Live per-platform balance (new)
+    if balances is not None:
+        yes_platform = opportunity.buy_yes_platform
+        no_platform = opportunity.buy_no_platform
+        yes_remaining = balances.remaining.get(yes_platform, 0.0)
+        no_remaining = balances.remaining.get(no_platform, 0.0)
+        if yes_leg_dollars > yes_remaining:
+            return False, (
+                f"Insufficient {yes_platform} balance for YES leg: "
+                f"need ${yes_leg_dollars:.2f}, have ${yes_remaining:.2f}"
+            )
+        if no_leg_dollars > no_remaining:
+            return False, (
+                f"Insufficient {no_platform} balance for NO leg: "
+                f"need ${no_leg_dollars:.2f}, have ${no_remaining:.2f}"
+            )
+        # If both legs land on the same platform (shouldn't happen for cross-
+        # platform arbs, but be defensive), combined spend must fit.
+        if yes_platform == no_platform:
+            combined = yes_leg_dollars + no_leg_dollars
+            if combined > yes_remaining:
+                return False, (
+                    f"Insufficient {yes_platform} balance for combined legs: "
+                    f"need ${combined:.2f}, have ${yes_remaining:.2f}"
+                )
 
     return True, "All risk checks passed"
