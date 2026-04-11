@@ -110,6 +110,19 @@ SNS_TOPIC_ARN: str = os.environ.get("SNS_TOPIC_ARN", "")
 ALERT_ROI_THRESHOLD: float = float(os.environ.get("ALERT_ROI_THRESHOLD", "0.02"))
 ALERTS_ENABLED: bool = os.environ.get("ALERTS_ENABLED", "false").lower() == "true"
 
+# Dedupe: suppress re-alerts for the same opportunity_key within this window,
+# unless the ROI improves by at least ALERT_ROI_DELTA (fractional, not percent).
+# After the cooldown, a stale-but-still-open opportunity can re-fire once.
+ALERT_COOLDOWN_HOURS: float = float(os.environ.get("ALERT_COOLDOWN_HOURS", "6"))
+ALERT_ROI_DELTA: float = float(os.environ.get("ALERT_ROI_DELTA", "0.01"))
+
+# JSON state file for alert dedupe. Relative paths resolve against the repo
+# root (the scanner cron wrapper cds there before invoking main.py).
+ALERT_STATE_PATH: str = os.environ.get(
+    "ALERT_STATE_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "alert_state.json"),
+)
+
 
 # ---------------------------------------------------------------------------
 # Execution settings
