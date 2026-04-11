@@ -5,7 +5,7 @@ Data models for arbitrage opportunities.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 @dataclass
@@ -55,7 +55,7 @@ class Opportunity:
 
     # Metadata
     source_table: str = ""
-    detected_at: datetime = field(default_factory=datetime.utcnow)
+    detected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Unique key for deduplication across scans
     @property
